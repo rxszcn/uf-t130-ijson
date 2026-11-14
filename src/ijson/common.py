@@ -1,6 +1,7 @@
 '''
 Backend independent higher level interfaces, common exceptions.
 '''
+import codecs
 import decimal
 import inspect
 import io
@@ -231,17 +232,81 @@ def file_source(f, buf_size=64*1024):
             break
 
 
+@utils.coroutine
+def utf8_transcoder(target, encoding):
+    '''
+    A coroutine decoding incoming bytes using `encoding` and re-encoding them
+    as UTF-8, so that backends further down the pipeline only ever see UTF-8
+    content regardless of the input encoding.
+
+    Error policy:
+
+    - A `UnicodeDecodeError` raised while more input could still arrive means
+      the bytes are not valid in the declared encoding; it is propagated
+      unchanged (and is deliberately *not* an `IncompleteJSONError`, so that
+      callers can tell "wrong encoding" apart from "truncated input").
+    - A `UnicodeDecodeError` raised by the final decoder flush means the
+      stream ended in the middle of a multi-byte character; this is reported
+      as `IncompleteJSONError`, like any other truncated input.
+    '''
+    decoder = codecs.getincrementaldecoder(encoding)()
+    decode = decoder.decode
+    send = target.send
+    while True:
+        try:
+            final = False
+            bdata = (yield)
+        except GeneratorExit:
+            final = True
+            bdata = b''
+        if not bdata:
+            # An empty chunk signals EOF; flush the decoder so that a
+            # multi-byte character truncated at the end of the stream
+            # surfaces instead of being silently dropped.
+            final = True
+        try:
+            sdata = decode(bdata, final)
+        except UnicodeDecodeError as e:
+            try:
+                target.close()
+            except:
+                pass
+            if final:
+                raise IncompleteJSONError(e)
+            raise
+        if sdata:
+            send(sdata.encode('utf-8'))
+        if not bdata:
+            target.close()
+            break
+
+
+def _encoding_stage(config):
+    '''
+    Pops the `encoding` option out of a backend configuration and returns the
+    pipeline stage handling it, if any. Unknown encoding names are rejected
+    eagerly with the `LookupError` raised by `codecs.lookup`. UTF-8 (under any
+    of its aliases) needs no stage: it is what backends consume natively.
+    '''
+    encoding = config.pop('encoding', None)
+    if encoding is None:
+        return ()
+    if codecs.lookup(encoding).name == 'utf-8':
+        return ()
+    return ((utf8_transcoder, [encoding], {}),)
+
+
 def _basic_parse_pipeline(backend, config):
     return (
         (backend['basic_parse_basecoro'], [], config),
-    )
+    ) + _encoding_stage(config)
 
 
 def _parse_pipeline(backend, config):
     return (
         (backend['parse_basecoro'], [], {}),
         (backend['basic_parse_basecoro'], [], config)
-    )
+    ) + _encoding_stage(config)
 
 
 def _items_pipeline(backend, prefix, map_type, config):
@@ -249,7 +314,7 @@ def _items_pipeline(backend, prefix, map_type, config):
         (backend['items_basecoro'], (prefix,), {'map_type': map_type}),
         (backend['parse_basecoro'], [], {}),
         (backend['basic_parse_basecoro'], [], config)
-    )
+    ) + _encoding_stage(config)
 
 
 def _kvitems_pipeline(backend, prefix, map_type, config):
@@ -257,7 +322,7 @@ def _kvitems_pipeline(backend, prefix, map_type, config):
         (backend['kvitems_basecoro'], (prefix,), {'map_type': map_type}),
         (backend['parse_basecoro'], [], {}),
         (backend['basic_parse_basecoro'], [], config)
-    )
+    ) + _encoding_stage(config)
 
 
 def _make_basic_parse_coro(backend):

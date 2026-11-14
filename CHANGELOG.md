@@ -2,6 +2,18 @@
 
 ## Development
 
+* All streaming parse entry points (`basic_parse`, `parse`, `items`,
+  `kvitems` and their `_gen`/`_coro`/`_async` variants) now accept an
+  `encoding` option naming the character encoding of the input bytes
+  (e.g., `encoding='gbk'`). Bytes are incrementally decoded and
+  transcoded to UTF-8 before reaching the backend, so the emitted events
+  are identical to those of the equivalent UTF-8 document. The default
+  (`utf-8`) keeps the previous behavior untouched. Unknown encoding
+  names raise `LookupError` eagerly; input that is undecodable in the
+  declared encoding raises `UnicodeDecodeError`, while input truncated
+  in the middle of a multi-byte character raises `IncompleteJSONError`
+  like any other truncated document.
+
 * Fixed handling of integers longer than `sys.get_int_max_str_digits()`:
   the `yajl2_c` backend no longer crashes on them, and all backends
   now raise the `ValueError` produced by `int()` (#188).
